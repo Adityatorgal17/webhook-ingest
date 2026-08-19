@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"strings"
 	"sync"
@@ -172,5 +173,42 @@ func TestRecordingProcessingContinuesAfterRequestContextCancel(t *testing.T) {
 	}
 	if !processed {
 		t.Fatal("expected recording to still be marked processed after request context was canceled")
+	}
+}
+
+func TestIngestRollsBackOnWriteFailure(t *testing.T) {
+	cfg := config.Load()
+	st := testutil.NewStore(t)
+	rdb, err := redisclient.New(context.Background(), cfg.RedisAddr)
+	if err != nil {
+		t.Fatalf("connect to redis: %v", err)
+	}
+	defer func() { _ = rdb.Close() }()
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	svc := ingest.New(st, stats.NewCache(), rdb, log)
+
+	eventID, callID, accountID := testutil.IDs(t, st)
+	evt := ingest.Event{
+		EventID:      eventID,
+		CallID:       callID,
+		AccountID:    accountID,
+		Status:       "completed",
+		DurationSec:  math.MaxInt32 + 1,
+		RecordingURL: "https://recordings.example.com/test.wav",
+		OccurredAt:   time.Now().UTC(),
+	}
+
+	if err := svc.Ingest(context.Background(), evt); err == nil {
+		t.Fatal("expected ingest to fail when a later DB write exceeds the integer range")
+	}
+
+	var n int
+	row := st.Pool().QueryRow(context.Background(), `SELECT count(*) FROM events WHERE event_id = $1`, eventID)
+	if err := row.Scan(&n); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("stored %d event rows for failed ingest, want 0", n)
 	}
 }

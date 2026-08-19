@@ -53,19 +53,13 @@ func (s *Service) Ingest(ctx context.Context, evt Event) error {
 		Payload:      payload,
 	}
 
-	inserted, err := s.store.InsertEvent(ctx, rec)
+	inserted, err := s.store.SaveIngest(ctx, rec)
 	if err != nil {
 		return err
 	}
 	if !inserted {
 		s.log.Info("duplicate delivery ignored", "event_id", evt.EventID)
 		return nil
-	}
-	if err := s.store.UpsertCall(ctx, rec); err != nil {
-		return err
-	}
-	if err := s.store.IncrementAccountStats(ctx, rec.AccountID, rec.DurationSec); err != nil {
-		return err
 	}
 	s.cache.Record(rec.AccountID, rec.DurationSec)
 
