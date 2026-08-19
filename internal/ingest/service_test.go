@@ -3,11 +3,18 @@ package ingest_test
 import (
 	"context"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/convin/webhook-ingest/internal/config"
+	"github.com/convin/webhook-ingest/internal/ingest"
+	"github.com/convin/webhook-ingest/internal/redisclient"
+	"github.com/convin/webhook-ingest/internal/stats"
 	"github.com/convin/webhook-ingest/internal/testutil"
 )
 
@@ -122,5 +129,48 @@ func TestConcurrentDuplicateDeliveryIsIgnored(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("stored %d copies of %s under concurrency, want 1", n, eventID)
+	}
+}
+
+func TestRecordingProcessingContinuesAfterRequestContextCancel(t *testing.T) {
+	cfg := config.Load()
+	st := testutil.NewStore(t)
+	rdb, err := redisclient.New(context.Background(), cfg.RedisAddr)
+	if err != nil {
+		t.Fatalf("connect to redis: %v", err)
+	}
+	defer func() { _ = rdb.Close() }()
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	svc := ingest.New(st, stats.NewCache(), rdb, log)
+
+	eventID, callID, accountID := testutil.IDs(t, st)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	evt := ingest.Event{
+		EventID:      eventID,
+		CallID:       callID,
+		AccountID:    accountID,
+		Status:       "completed",
+		DurationSec:  143,
+		RecordingURL: "https://recordings.example.com/test.wav",
+		OccurredAt:   time.Now().UTC(),
+	}
+
+	if err := svc.Ingest(ctx, evt); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	cancel()
+
+	time.Sleep(200 * time.Millisecond)
+
+	var processed bool
+	row := st.Pool().QueryRow(context.Background(), `SELECT recording_processed FROM calls WHERE call_id = $1`, callID)
+	if err := row.Scan(&processed); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if !processed {
+		t.Fatal("expected recording to still be marked processed after request context was canceled")
 	}
 }

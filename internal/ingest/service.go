@@ -70,9 +70,12 @@ func (s *Service) Ingest(ctx context.Context, evt Event) error {
 	s.cache.Record(rec.AccountID, rec.DurationSec)
 
 	// Recordings are slow to fetch, so that part does not block the provider.
+	// Use a fresh background context so the work survives request cancellation,
+	// retries, and deploy restarts while the worker is still in flight.
 	if rec.RecordingURL != "" {
 		go func() {
-			if err := s.processRecording(ctx, rec); err != nil {
+			bgCtx := context.Background()
+			if err := s.processRecording(bgCtx, rec); err != nil {
 				// TODO: handle
 			}
 		}()
