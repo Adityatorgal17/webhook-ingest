@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/convin/webhook-ingest/internal/testutil"
@@ -80,5 +81,46 @@ func TestDuplicateDeliveryIsIgnored(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("stored %d copies of %s, want 1", n, eventID)
+	}
+}
+
+func TestConcurrentDuplicateDeliveryIsIgnored(t *testing.T) {
+	srv, st := testutil.NewServer(t)
+	eventID, callID, accountID := testutil.IDs(t, st)
+	ctx := context.Background()
+	body := eventJSON(eventID, callID, accountID)
+
+	const workers = 25
+	start := make(chan struct{})
+	results := make(chan int, workers)
+
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			resp := post(t, srv.URL+"/webhooks/calls", body)
+			results <- resp.StatusCode
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+	close(results)
+
+	for code := range results {
+		if code != http.StatusOK {
+			t.Fatalf("got status %d, want 200 for all deliveries", code)
+		}
+	}
+
+	var n int
+	row := st.Pool().QueryRow(ctx, `SELECT count(*) FROM events WHERE event_id = $1`, eventID)
+	if err := row.Scan(&n); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("stored %d copies of %s under concurrency, want 1", n, eventID)
 	}
 }
